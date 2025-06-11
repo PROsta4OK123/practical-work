@@ -52,3 +52,10 @@ src/main/resources/static/out/
 # Logs
 logs/
 *.log
+
+# Large installation files (too big for GitHub)
+*.exe
+*.msi
+*.dmg
+*.pkg
+OllamaSetup.*

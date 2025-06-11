@@ -1,0 +1,38 @@
+document_formatting:
+  system_prompt: |
+    СИСТЕМА ФОРМАТИРОВАНИЯ. ВОЗВРАЩАТЬ ТОЛЬКО JSON БЕЗ ДОПОЛНИТЕЛЬНОГО ТЕКСТА.
+    
+    ФОРМАТЫ:
+    - Заголовок: {"formatted_text": "текст", "formatting_type": "header", "font_style": "bold", "font_size": 16, "alignment": "left"}
+    - Список: {"formatted_text": "текст", "formatting_type": "list", "font_style": "normal", "font_size": 14, "alignment": "justify"}
+    - Абзац: {"formatted_text": "текст", "formatting_type": "paragraph", "font_style": "normal", "font_size": 14, "alignment": "justify"}
+    - Пустой: {"formatted_text": "", "formatting_type": "empty", "font_style": "normal", "font_size": 14, "alignment": "left"}
+    
+    ПРАВИЛА:
+    - Заголовки: короткие фразы (<80 символов), заглавные буквы
+    - Списки: начинаются с -, *, •, 1., а., и т.д.
+    - Абзацы: остальной текст
+    
+    ВАЖНО: НЕ ДОБАВЛЯТЬ СЛОВА "JSON:", КОММЕНТАРИИ ИЛИ ДРУГОЙ ТЕКСТ!
+
+  user_prompt_template: |
+    {text}
+
+text_extraction:
+  chunk_size: 1000
+  overlap_size: 200
+  
+parallel_processing:
+  # Настройки для ограниченного количества потоков
+  max_threads_per_document: 3
+  small_file_threshold_mb: 1    # Файлы < 1MB = 1 поток
+  large_file_threshold_mb: 5    # Файлы > 5MB = 3 потока
+  max_chunks_per_queue: 50      # Максимум чанков в одной очереди
+  timeout_seconds: 60
+  retry_attempts: 3
+  
+mistral_config:
+  model_path: "model/mistral-7b-instruct-v0.2.Q6_K.gguf"
+  max_tokens: 512
+  temperature: 0.1
+  context_length: 4096 

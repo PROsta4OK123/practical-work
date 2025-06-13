@@ -11,6 +11,7 @@ import { useLanguage } from "@/components/language-provider"
 import { useToast } from "@/hooks/use-toast"
 import { FileText, Download, AlertCircle, Clock, CheckCircle, XCircle } from "lucide-react"
 import { UploadForm } from "@/components/upload-form"
+import { DocumentProgress } from "@/components/document-progress"
 import { apiClient, type QueueStatistics } from "@/lib/api-client"
 import Link from "next/link"
 
@@ -36,18 +37,47 @@ export default function DashboardPage() {
     }
   }, [user, mounted])
 
+  // Автоматическое обновление данных каждые 10 секунд
+  useEffect(() => {
+    if (user && mounted) {
+      const interval = setInterval(() => {
+        loadUserData()
+      }, 10000) // Обновляем каждые 10 секунд
+
+      return () => clearInterval(interval)
+    }
+  }, [user, mounted])
+
   const loadUserData = async () => {
     setIsLoadingDocs(true)
     try {
+      console.log('🔍 Загружаем данные пользователя...')
+      
+      // Проверяем токен
+      const token = localStorage.getItem('authToken')
+      console.log('🔑 Токен:', token ? `Есть (${token.length} символов)` : 'Отсутствует')
+      
       // Load queue status and user files
+      console.log('📡 Отправляем запрос к /api/queue/status...')
       const queueResponse = await apiClient.getQueueStatus()
+      console.log('✅ Ответ получен:', queueResponse)
+      
       setQueueData(queueResponse)
       setDocuments(queueResponse.userFiles || [])
+      
+      console.log('📊 Данные загружены успешно')
     } catch (error) {
-      console.error('Failed to load user data:', error)
+      console.error('❌ Ошибка загрузки данных:', error)
+      console.error('📋 Детали ошибки:', {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        type: typeof error,
+        error
+      })
+      
       toast({
         title: "Ошибка",
-        description: "Не удалось загрузить данные",
+        description: `Не удалось загрузить данные: ${error instanceof Error ? error.message : String(error)}`,
         variant: "destructive",
       })
     } finally {
@@ -129,8 +159,12 @@ export default function DashboardPage() {
         return <Clock className="h-4 w-4 text-blue-500" />
       case 'pending':
         return <Clock className="h-4 w-4 text-yellow-500" />
+      case 'uploaded':
+        return <FileText className="h-4 w-4 text-blue-400" />
       case 'failed':
         return <XCircle className="h-4 w-4 text-red-500" />
+      case 'cancelled':
+        return <XCircle className="h-4 w-4 text-gray-500" />
       default:
         return <Clock className="h-4 w-4 text-gray-500" />
     }
@@ -199,46 +233,27 @@ export default function DashboardPage() {
               <div className="grid gap-4">
                 {documents.length > 0 ? (
                     documents.map((doc: any) => (
-                      <Card key={doc.fileId}>
-                      <CardContent className="p-4 flex items-center justify-between">
-                        <div className="flex items-center space-x-4">
-                          <div className="p-2 bg-primary/10 rounded">
-                            <FileText className="h-6 w-6 text-primary" />
-                          </div>
-                          <div>
-                              <div className="flex items-center gap-2">
-                                <p className="font-medium">{doc.originalFilename}</p>
-                                {getStatusIcon(doc.status)}
-                              </div>
-                              <p className="text-sm text-muted-foreground">
-                                {formatDate(doc.createdAt)} • {doc.status}
-                                {doc.queuePosition && doc.queuePosition > 0 && (
-                                  <span className="ml-2 text-blue-600">
-                                    В очереди: #{doc.queuePosition}
-                                  </span>
-                                )}
-                              </p>
-                          </div>
-                        </div>
-                        <div className="flex items-center space-x-4">
-                          <div className="text-right text-sm">
-                              <p>Размер: {formatFileSize(doc.fileSizeBytes || 0)}</p>
-                              <p>Приоритет: {doc.priority?.toLowerCase()}</p>
-                              {doc.estimatedThreads && (
-                                <p>Потоков: {doc.estimatedThreads}</p>
-                              )}
-                          </div>
-                            <Button 
-                              variant="ghost" 
-                              size="icon"
-                              disabled={doc.status !== 'completed'}
-                              onClick={() => downloadDocument(doc.fileId, doc.originalFilename)}
-                            >
-                            <Download className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
+                      <DocumentProgress
+                        key={doc.fileId}
+                        fileId={doc.fileId}
+                        filename={doc.originalFilename}
+                        status={doc.status}
+                        onStatusChange={(newStatus) => {
+                          // Обновляем статус документа в локальном состоянии
+                          setDocuments(prev => 
+                            prev.map(d => 
+                              d.fileId === doc.fileId 
+                                ? { ...d, status: newStatus }
+                                : d
+                            )
+                          )
+                          
+                          // Если документ завершен, перезагружаем данные
+                          if (newStatus === 'completed') {
+                            loadUserData()
+                          }
+                        }}
+                      />
                   ))
                 ) : (
                   <Card>

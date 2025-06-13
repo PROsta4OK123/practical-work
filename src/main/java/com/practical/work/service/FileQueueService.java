@@ -7,14 +7,18 @@ import com.practical.work.model.User;
 import com.practical.work.repository.FileProcessingQueueRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Service
+@Scope("singleton")
 @Slf4j
 public class FileQueueService {
 
@@ -27,6 +31,10 @@ public class FileQueueService {
     // Размеры файлов для определения приоритета
     private static final long SMALL_FILE_THRESHOLD = 1024 * 1024; // 1 MB
     private static final long LARGE_FILE_THRESHOLD = 5 * 1024 * 1024; // 5 MB
+
+    // Поля для кеширования статистики с thread-safe операциями
+    private final AtomicReference<QueueStatistics> cachedStats = new AtomicReference<>();
+    private final AtomicReference<LocalDateTime> lastStatsUpdate = new AtomicReference<>();
 
     /**
      * Добавляет файл в очередь обработки
@@ -176,21 +184,37 @@ public class FileQueueService {
     }
 
     /**
-     * Получает статистику очереди
+     * Получает статистику очереди (оптимизированная версия с кешированием)
      */
-    public QueueStatistics getQueueStatistics() {
+    public synchronized QueueStatistics getQueueStatistics() {
+        // Кешируем результат на 30 секунд чтобы не делать запросы каждые 5 секунд
+        if (lastStatsUpdate.get() != null && 
+            lastStatsUpdate.get().isAfter(LocalDateTime.now().minusSeconds(30))) {
+            log.debug("Возвращаем кешированную статистику очереди");
+            return cachedStats.get();
+        }
+        
+        log.debug("Обновляем статистику очереди из базы данных");
+        
+        // Делаем запросы к базе данных только если кеш устарел
         long pending = queueRepository.countByStatus(QueueStatus.PENDING);
         long processing = queueRepository.countByStatus(QueueStatus.PROCESSING);
         long completed = queueRepository.countByStatus(QueueStatus.COMPLETED);
         long failed = queueRepository.countByStatus(QueueStatus.FAILED);
 
-        return QueueStatistics.builder()
+        QueueStatistics stats = QueueStatistics.builder()
             .pendingCount(pending)
             .processingCount(processing)
             .completedCount(completed)
             .failedCount(failed)
             .totalInQueue(pending + processing)
             .build();
+            
+        cachedStats.set(stats);
+        lastStatsUpdate.set(LocalDateTime.now());
+        log.debug("Статистика очереди обновлена: pending={}, processing={}, completed={}, failed={}", 
+            pending, processing, completed, failed);
+        return stats;
     }
 
     /**

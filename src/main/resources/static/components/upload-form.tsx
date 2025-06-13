@@ -13,6 +13,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useAuth } from "@/components/auth-provider"
 import { useLanguage } from "@/components/language-provider"
 import { apiClient } from "@/lib/api-client"
+import { uploadLogger, uiLogger } from "@/lib/logger"
 import Link from "next/link"
 
 export function UploadForm() {
@@ -25,14 +26,33 @@ export function UploadForm() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0]
+    uiLogger.userAction('file_selected', { 
+      fileName: selectedFile?.name,
+      fileSize: selectedFile?.size,
+      fileType: selectedFile?.type 
+    })
+    
     if (selectedFile) {
+      uploadLogger.info('File selected for upload', {
+        fileName: selectedFile.name,
+        fileSize: selectedFile.size,
+        fileType: selectedFile.type,
+        lastModified: new Date(selectedFile.lastModified).toISOString()
+      })
+      
       // Check if file is a Word document
       if (
         selectedFile.type === "application/msword" ||
         selectedFile.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       ) {
         setFile(selectedFile)
+        uploadLogger.info('Valid Word document selected', { fileName: selectedFile.name })
       } else {
+        uploadLogger.warn('Invalid file type selected', { 
+          fileName: selectedFile.name,
+          fileType: selectedFile.type,
+          expectedTypes: ['application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
+        })
         toast({
           title: t.common.error,
           description: t.upload.errors.invalidFileType,
@@ -43,10 +63,22 @@ export function UploadForm() {
   }
 
   const handleUpload = async () => {
-    if (!file) return
+    if (!file) {
+      uploadLogger.warn('Upload attempted without selected file')
+      return
+    }
+
+    const startTime = Date.now()
+    uploadLogger.info('Starting document upload process', {
+      fileName: file.name,
+      fileSize: file.size,
+      userId: user?.id
+    })
+    uiLogger.userAction('upload_initiated', { fileName: file.name, fileSize: file.size })
 
     // Check if user is logged in
     if (!user) {
+      uploadLogger.security('Upload attempted without authentication', { fileName: file.name })
       toast({
         title: t.common.error,
         description: t.upload.errors.authRequired,
@@ -58,6 +90,12 @@ export function UploadForm() {
 
     // Check if user has enough points
     if (user.points < 1) {
+      uploadLogger.warn('Upload attempted with insufficient points', { 
+        userId: user.id,
+        userPoints: user.points,
+        requiredPoints: 1,
+        fileName: file.name
+      })
       toast({
         title: t.common.error,
         description: t.upload.errors.insufficientPoints,
@@ -70,10 +108,25 @@ export function UploadForm() {
     setIsUploading(true)
 
     try {
+      uploadLogger.debug('Sending document for formatting', { 
+        fileName: file.name,
+        fileSize: file.size,
+        userId: user.id
+      })
+      
       // Используем реальный API для форматирования документа
       const response = await apiClient.formatDocument(file)
+      const duration = Date.now() - startTime
 
       if (response.success && response.fileId) {
+        uploadLogger.info('Document upload successful', {
+          fileName: file.name,
+          fileId: response.fileId,
+          userId: user.id,
+          duration,
+          queuePosition: response.queuePosition
+        })
+        
         toast({
           title: "Успешно!",
           description: response.message || "Файл добавлен в очередь обработки",
@@ -83,6 +136,14 @@ export function UploadForm() {
         // Перенаправляем на страницу обработки с реальным fileId
         router.push(`/processing/${response.fileId}`)
       } else {
+        uploadLogger.error('Document upload failed - server response', {
+          fileName: file.name,
+          userId: user.id,
+          error: response.error,
+          message: response.message,
+          duration
+        })
+        
         toast({
           title: "Ошибка",
           description: response.error || "Не удалось обработать файл",
@@ -91,10 +152,19 @@ export function UploadForm() {
         setIsUploading(false)
       }
     } catch (error: any) {
-      console.error('Upload error:', error)
+      const duration = Date.now() - startTime
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      
+      uploadLogger.error('Document upload failed - exception', {
+        fileName: file.name,
+        userId: user.id,
+        error: errorMessage,
+        duration
+      })
+      
       toast({
         title: "Ошибка",
-        description: error.message || "Не удалось загрузить файл",
+        description: errorMessage || "Не удалось загрузить файл",
         variant: "destructive",
       })
       setIsUploading(false)

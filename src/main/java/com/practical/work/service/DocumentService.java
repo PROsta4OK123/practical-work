@@ -1,18 +1,25 @@
 package com.practical.work.service;
 
 import com.practical.work.dto.DocumentUploadResponse;
+import com.practical.work.dto.TextChunk;
 import com.practical.work.entity.FileProcessingQueue;
 import com.practical.work.model.ProcessedDocument;
 import com.practical.work.model.User;
 import com.practical.work.repository.ProcessedDocumentRepository;
+import com.practical.work.event.FileQueuedEvent;
+import com.practical.work.event.DocumentChunksCountUpdatedEvent;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -47,14 +54,29 @@ public class DocumentService {
     private FileQueueService fileQueueService;
 
     @Autowired
-    private EventDrivenQueueProcessor queueProcessor;
+    private ApplicationEventPublisher eventPublisher;
 
     public DocumentUploadResponse uploadDocument(MultipartFile file, User user) {
+        long startTime = System.currentTimeMillis();
+
+        if (user == null) {
+            log.error("Попытка загрузки файла неавторизованным пользователем");
+            return DocumentUploadResponse.builder()
+                .success(false)
+                .message("Пользователь не авторизован. Пожалуйста, войдите в систему.")
+                .build();
+        }
+
+        String fileName = file.getOriginalFilename();
+        long fileSize = file.getSize();
+        
         try {
-            log.info("Загрузка документа {} пользователем {}", file.getOriginalFilename(), user.getEmail());
+            log.info("Загрузка документа {} пользователем {} (размер: {} байт)", 
+                    fileName, user.getEmail(), fileSize);
 
             // Проверка файла
             if (file.isEmpty()) {
+                log.warn("Попытка загрузки пустого файла пользователем {}", user.getEmail());
                 return DocumentUploadResponse.builder()
                     .success(false)
                     .message("Файл пустой")
@@ -87,12 +109,26 @@ public class DocumentService {
 
             // Генерация уникального идентификатора файла
             String fileId = UUID.randomUUID().toString();
-            String fileName = fileId + "_" + file.getOriginalFilename();
-            File uploadFile = new File(uploadDirectory, fileName);
+            String storedFileName = fileId + "_" + file.getOriginalFilename();
+            File uploadFile = new File(uploadDirectory, storedFileName);
             String filePath = uploadFile.getAbsolutePath();
 
             // Сохранение файла на диск
             file.transferTo(uploadFile);
+            
+            // Предварительная оценка количества чанков на основе размера файла
+            int paragraphCount = 0;
+            try {
+                // Пытаемся быстро посчитать абзацы для более точной оценки
+                XWPFDocument doc = new XWPFDocument(new FileInputStream(uploadFile));
+                paragraphCount = doc.getParagraphs().size();
+                doc.close();
+            } catch (Exception e) {
+                log.warn("Не удалось посчитать абзацы для предварительной оценки: {}", e.getMessage());
+            }
+            
+            // Оцениваем количество чанков
+            int estimatedChunks = documentProcessingService.estimateChunksCount(filePath, paragraphCount);
 
             // Создание записи в базе данных
             ProcessedDocument document = ProcessedDocument.builder()
@@ -100,6 +136,7 @@ public class DocumentService {
                 .originalFilename(file.getOriginalFilename())
                 .originalFilePath(filePath)
                 .originalSize(file.getSize())
+                .estimatedChunks(estimatedChunks)
                 .status(ProcessedDocument.ProcessingStatus.UPLOADED)
                 .user(user)
                 .build();
@@ -115,14 +152,16 @@ public class DocumentService {
                 user
             );
 
+            // Публикуем событие, что файл добавлен в очередь
+            eventPublisher.publishEvent(new FileQueuedEvent(this, fileId, queueItem.getId()));
+
             // Получаем позицию в очереди
             int queuePosition = fileQueueService.getQueuePosition(queueItem.getId());
             String queueMessage = queuePosition > 0 ? 
                 String.format(" Позиция в очереди: %d", queuePosition) : "";
 
-            log.info("Документ загружен успешно и добавлен в очередь: {}", fileId);
-
-            queueProcessor.processNextInQueue();
+            long duration = System.currentTimeMillis() - startTime;
+            log.info("Документ загружен успешно и добавлен в очередь: {} ({}ms)", fileId, duration);
 
             return DocumentUploadResponse.builder()
                 .success(true)
@@ -134,13 +173,17 @@ public class DocumentService {
                 .build();
 
         } catch (IOException e) {
-            log.error("Ошибка загрузки файла", e);
+            long duration = System.currentTimeMillis() - startTime;
+            log.error("Ошибка загрузки файла {} пользователем {} ({}ms): {}", 
+                    fileName, user.getEmail(), duration, e.getMessage(), e);
             return DocumentUploadResponse.builder()
                 .success(false)
                 .message("Ошибка сохранения файла: " + e.getMessage())
                 .build();
         } catch (Exception e) {
-            log.error("Неожиданная ошибка при загрузке файла", e);
+            long duration = System.currentTimeMillis() - startTime;
+            log.error("Неожиданная ошибка при загрузке файла {} пользователем {} ({}ms): {}", 
+                    fileName, user.getEmail(), duration, e.getMessage(), e);
             return DocumentUploadResponse.builder()
                 .success(false)
                 .message("Внутренняя ошибка сервера")
@@ -177,8 +220,38 @@ public class DocumentService {
                 document.setStatus(ProcessedDocument.ProcessingStatus.PROCESSING);
                 document.setProcessingStartedAt(LocalDateTime.now());
                 documentRepository.save(document);
+                
+                // Предварительное разделение на чанки для точного определения прогресса
+                String inputFilePath = document.getOriginalFilePath();
+                int chunksCount = 0;
+                
+                try {
+                    // Загрузка документа для анализа
+                    XWPFDocument docFile = new XWPFDocument(new FileInputStream(inputFilePath));
+                    List<XWPFParagraph> paragraphs = docFile.getParagraphs();
+                    
+                    // Создаем текстовые чанки для обработки
+                    List<TextChunk> textChunks = documentProcessingService.createTextChunksPreview(paragraphs);
+                    
+                    // Закрываем документ
+                    docFile.close();
+                    
+                    chunksCount = textChunks.size();
+                    log.info("Предварительный анализ документа {}: найдено {} чанков", fileId, chunksCount);
+                    
+                    // Обновляем количество чанков в базе данных
+                    document.setEstimatedChunks(chunksCount);
+                    documentRepository.save(document);
+                    
+                    // Публикуем событие об обновлении количества чанков
+                    eventPublisher.publishEvent(new DocumentChunksCountUpdatedEvent(this, fileId, chunksCount));
+                    
+                } catch (Exception e) {
+                    log.warn("Ошибка предварительного анализа документа {}: {}", fileId, e.getMessage());
+                    // Продолжаем обработку даже при ошибке анализа
+                }
 
-                // Обработка документа
+                // Обработка документа (теперь с точным количеством чанков)
                 String processedFilePath = documentProcessingService
                     .processDocument(document.getOriginalFilePath(), fileId).get();
 

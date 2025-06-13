@@ -21,34 +21,53 @@ public class AuthService {
     private JwtService jwtService;
 
     public AuthResponse login(AuthRequest authRequest) {
-        log.info("Попытка входа пользователя: {}", authRequest.getEmail());
+        long startTime = System.currentTimeMillis();
+        String email = authRequest.getEmail();
+        
+        log.info("Попытка входа пользователя: {}", email);
 
-        Optional<User> userOpt = userService.findByEmail(authRequest.getEmail());
-        if (userOpt.isEmpty()) {
-            throw new RuntimeException("Пользователь не найден");
+        try {
+            Optional<User> userOpt = userService.findByEmail(email);
+            if (userOpt.isEmpty()) {
+                log.warn("Пользователь не найден: {}", email);
+                throw new RuntimeException("Пользователь не найден");
+            }
+
+            User user = userOpt.get();
+            log.debug("Пользователь найден: {} (ID: {}, активен: {})", 
+                    user.getEmail(), user.getId(), user.getIsActive());
+
+            if (!user.getIsActive()) {
+                log.warn("Попытка входа заблокированного пользователя: {}", email);
+                throw new RuntimeException("Аккаунт заблокирован");
+            }
+
+            if (!userService.validatePassword(user, authRequest.getPassword())) {
+                log.warn("Неверный пароль для пользователя: {}", email);
+                throw new RuntimeException("Неверный пароль");
+            }
+
+            log.debug("Пароль валиден для пользователя: {}", email);
+
+            String accessToken = jwtService.generateAccessToken(user);
+            String refreshToken = jwtService.generateRefreshToken(user);
+
+            long duration = System.currentTimeMillis() - startTime;
+            log.info("Пользователь {} успешно авторизован ({}ms)", email, duration);
+
+            return AuthResponse.builder()
+                .accessToken(accessToken)
+                .refreshToken(refreshToken)
+                .tokenType("Bearer")
+                .user(userService.convertToResponse(user))
+                .build();
+                
+        } catch (Exception e) {
+            long duration = System.currentTimeMillis() - startTime;
+            log.error("Ошибка аутентификации пользователя {} ({}ms): {}", 
+                    email, duration, e.getMessage());
+            throw e;
         }
-
-        User user = userOpt.get();
-
-        if (!user.getIsActive()) {
-            throw new RuntimeException("Аккаунт заблокирован");
-        }
-
-        if (!userService.validatePassword(user, authRequest.getPassword())) {
-            throw new RuntimeException("Неверный пароль");
-        }
-
-        String accessToken = jwtService.generateAccessToken(user);
-        String refreshToken = jwtService.generateRefreshToken(user);
-
-        log.info("Пользователь {} успешно авторизован", user.getEmail());
-
-        return AuthResponse.builder()
-            .accessToken(accessToken)
-            .refreshToken(refreshToken)
-            .tokenType("Bearer")
-            .user(userService.convertToResponse(user))
-            .build();
     }
 
     public AuthResponse register(RegisterRequest registerRequest) {

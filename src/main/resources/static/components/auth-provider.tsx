@@ -2,6 +2,7 @@
 
 import type React from "react"
 import { createContext, useContext, useEffect, useState } from "react"
+import { authLogger } from "@/lib/logger"
 
 type User = {
   id: number
@@ -35,34 +36,57 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Check authentication status on mount
   useEffect(() => {
+    authLogger.info('AuthProvider initializing')
     checkAuthStatus()
   }, [])
 
   const checkAuthStatus = async () => {
+    const startTime = Date.now()
+    authLogger.debug('Checking authentication status')
+    
     try {
       const token = localStorage.getItem('authToken')
       if (!token) {
+        authLogger.info('No auth token found, user not authenticated')
         setIsLoading(false)
         return
       }
 
-      const response = await fetch("http://localhost:8080/auth/me", {
+      authLogger.debug('Auth token found, verifying with server')
+      const response = await fetch("/api/auth/me", {
         method: "GET",
         headers: {
           'Authorization': `Bearer ${token}`
         }
       })
 
+      const duration = Date.now() - startTime
+      
       if (response.ok) {
         const data = await response.json()
         setUser(data)
+        authLogger.setUserId(data.id)
+        authLogger.info('User authenticated successfully', { 
+          userId: data.id, 
+          email: data.email,
+          role: data.role,
+          duration 
+        })
       } else {
+        authLogger.warn('Auth token verification failed', { 
+          status: response.status,
+          duration 
+        })
         localStorage.removeItem('authToken')
+        localStorage.removeItem('refreshToken')
         setUser(null)
       }
     } catch (error) {
-      console.error("Auth check failed:", error)
+      const duration = Date.now() - startTime
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      authLogger.error('Auth check failed', { error: errorMessage, duration })
       localStorage.removeItem('authToken')
+      localStorage.removeItem('refreshToken')
       setUser(null)
     } finally {
       setIsLoading(false)
@@ -70,9 +94,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
 
   const login = async (email: string, password: string) => {
+    const startTime = Date.now()
     setIsLoading(true)
+    authLogger.userAction('login_attempt', { email })
+    
     try {
-      const response = await fetch("http://localhost:8080/auth/login", {
+      authLogger.debug('Sending login request', { url: '/api/auth/login', email })
+      
+      const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -80,18 +109,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({ email, password }),
       })
 
+      authLogger.debug('Login response received', { 
+        status: response.status,
+        ok: response.ok,
+        statusText: response.statusText 
+      })
+
       const data = await response.json()
+      const duration = Date.now() - startTime
+
+      authLogger.debug('Login response data', { 
+        hasAccessToken: !!data.accessToken,
+        hasUser: !!data.user,
+        hasError: !!data.error,
+        data: data 
+      })
 
       if (!response.ok) {
-        throw new Error(data.error || "Login failed")
+        authLogger.warn('Login failed - server error', { 
+          email, 
+          status: response.status,
+          error: data.error || data.message,
+          fullResponse: data,
+          duration 
+        })
+        throw new Error(data.error || data.message || "Login failed")
       }
 
-      if (data.success && data.token) {
-        localStorage.setItem('authToken', data.token)
-      setUser(data.user)
+      // Обновляем под новую структуру ответа API
+      if (data.accessToken && data.user) {
+        localStorage.setItem('authToken', data.accessToken)
+        if (data.refreshToken) {
+          localStorage.setItem('refreshToken', data.refreshToken)
+        }
+        setUser(data.user)
+        authLogger.setUserId(data.user.id)
+        authLogger.info('Login successful', { 
+          userId: data.user.id,
+          email: data.user.email,
+          role: data.user.role,
+          tokenLength: data.accessToken.length,
+          hasRefreshToken: !!data.refreshToken,
+          duration 
+        })
+        
+        // Проверяем что токен действительно сохранился
+        const savedToken = localStorage.getItem('authToken')
+        authLogger.debug('Token verification after save', {
+          tokenSaved: !!savedToken,
+          tokenMatches: savedToken === data.accessToken,
+          savedTokenLength: savedToken?.length || 0
+        })
       } else {
-        throw new Error(data.message || "Login failed")
+        authLogger.warn('Login failed - invalid response structure', { 
+          email,
+          hasAccessToken: !!data.accessToken,
+          hasUser: !!data.user,
+          responseKeys: Object.keys(data),
+          fullResponse: data,
+          duration 
+        })
+        throw new Error("Login failed - invalid response structure")
       }
+    } catch (error) {
+      const duration = Date.now() - startTime
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      authLogger.error('Login error', { 
+        email, 
+        error: errorMessage, 
+        errorType: error instanceof TypeError ? 'TypeError' : 'Other',
+        duration 
+      })
+      throw error
     } finally {
       setIsLoading(false)
     }
@@ -100,7 +189,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const register = async (firstName: string, lastName: string, email: string, password: string) => {
     setIsLoading(true)
     try {
-      const response = await fetch("http://localhost:8080/auth/register", {
+      const response = await fetch("/api/auth/register", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -114,11 +203,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         throw new Error(data.error || "Registration failed")
       }
 
-      if (data.success && data.token) {
-        localStorage.setItem('authToken', data.token)
+      if (data.accessToken && data.user) {
+        localStorage.setItem('authToken', data.accessToken)
+        localStorage.setItem('refreshToken', data.refreshToken)
       setUser(data.user)
       } else {
-        throw new Error(data.message || "Registration failed")
+        throw new Error("Registration failed - invalid response")
       }
     } finally {
       setIsLoading(false)
@@ -127,13 +217,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     try {
-      await fetch("http://localhost:8080/auth/logout", {
+      await fetch("/api/auth/logout", {
         method: "POST",
       })
     } catch (error) {
       console.error("Logout error:", error)
     } finally {
       localStorage.removeItem('authToken')
+      localStorage.removeItem('refreshToken')
       setUser(null)
     }
   }

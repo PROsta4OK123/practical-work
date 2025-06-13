@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -8,24 +8,25 @@ import { Navbar } from "@/components/navbar"
 import { useAuth } from "@/components/auth-provider"
 import { useToast } from "@/hooks/use-toast"
 import { Check, CreditCard } from "lucide-react"
+import { apiClient } from "@/lib/api-client"
 
 const plans = [
   {
-    id: "basic",
+    id: "plan_1",
     name: "Basic",
     description: "For occasional document formatting",
     price: 9.99,
-    points: 30,
-    features: ["30 formatting points", "Standard formatting options", "Email support", "Valid for 30 days"],
+    points: 100,
+    features: ["100 formatting points", "Standard formatting options", "Email support", "Valid for 30 days"],
   },
   {
-    id: "pro",
+    id: "plan_2",
     name: "Professional",
     description: "For regular document formatting needs",
     price: 19.99,
-    points: 100,
+    points: 500,
     features: [
-      "100 formatting points",
+      "500 formatting points",
       "Advanced formatting options",
       "Priority email support",
       "Valid for 30 days",
@@ -34,13 +35,13 @@ const plans = [
     popular: true,
   },
   {
-    id: "enterprise",
+    id: "plan_3",
     name: "Enterprise",
     description: "For teams and businesses",
     price: 49.99,
-    points: 300,
+    points: 1000,
     features: [
-      "300 formatting points",
+      "1000 formatting points",
       "All formatting options",
       "Priority support",
       "Valid for 30 days",
@@ -55,6 +56,7 @@ export default function SubscriptionPage() {
   const router = useRouter()
   const { user, isLoading, addPoints } = useAuth()
   const { toast } = useToast()
+  const [isProcessing, setIsProcessing] = useState(false)
 
   useEffect(() => {
     if (!isLoading && !user) {
@@ -62,37 +64,64 @@ export default function SubscriptionPage() {
     }
   }, [user, isLoading, router])
 
-  const handlePurchase = (planId: string) => {
+  const handlePurchase = async (planId: string) => {
     const plan = plans.find((p) => p.id === planId)
-
     if (!plan) return
 
-    // Simulate payment processing
-    setTimeout(() => {
-      // Add points to user account
-      addPoints(plan.points)
+    try {
+      setIsProcessing(true)
+      
+      const token = localStorage.getItem('authToken')
+      if (!token) {
+        throw new Error('Not authenticated')
+      }
 
+      const response = await apiClient.purchaseSubscription(planId)
+      
+      if (response.success) {
+        addPoints(plan.points)
+
+        toast({
+          title: "Подписка оформлена",
+          description: `Вы успешно получили ${plan.points} баллов по тарифу ${plan.name}.`,
+          variant: "default",
+        })
+
+        router.push("/dashboard")
+      } else {
+        throw new Error(response.message || 'Не удалось оформить подписку')
+      }
+    } catch (error) {
+      console.error('Error purchasing subscription:', error)
       toast({
-        title: "Subscription Purchased",
-        description: `You have successfully purchased the ${plan.name} plan and received ${plan.points} points.`,
+        title: "Error",
+        description: error instanceof Error ? error.message : 'An error occurred while purchasing subscription',
+        variant: "destructive",
       })
-
-      router.push("/dashboard")
-    }, 1500)
+    } finally {
+      setIsProcessing(false)
+    }
   }
 
   if (isLoading || !user) {
-    return <div>Loading...</div>
+    return <div className="flex items-center justify-center min-h-screen">
+      <div className="text-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto"></div>
+        <p className="mt-2">Загрузка...</p>
+      </div>
+    </div>
   }
 
   return (
     <div className="min-h-screen flex flex-col">
       <Navbar />
-
       <main className="flex-1 container py-8">
         <div className="text-center mb-12">
           <h1 className="text-3xl font-bold">Choose Your Plan</h1>
           <p className="text-muted-foreground mt-2">Select a subscription plan that works for you</p>
+          <div className="mt-4 text-lg">
+            Current balance: <span className="font-bold text-primary">{user.points} points</span>
+          </div>
         </div>
 
         <div className="grid md:grid-cols-3 gap-6 max-w-6xl mx-auto">
@@ -122,13 +151,23 @@ export default function SubscriptionPage() {
                 </ul>
               </CardContent>
               <CardFooter>
-                <Button
-                  className="w-full"
+                <Button 
+                  className="w-full" 
                   variant={plan.popular ? "default" : "outline"}
                   onClick={() => handlePurchase(plan.id)}
+                  disabled={isProcessing}
                 >
-                  <CreditCard className="mr-2 h-4 w-4" />
-                  Subscribe
+                  {isProcessing ? (
+                    <>
+                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <CreditCard className="mr-2 h-4 w-4" />
+                      Subscribe
+                    </>
+                  )}
                 </Button>
               </CardFooter>
             </Card>
@@ -150,7 +189,7 @@ export default function SubscriptionPage() {
                 </p>
               </CardContent>
             </Card>
-            <Card>
+             <Card>
               <CardHeader>
                 <CardTitle className="text-lg">Can I cancel my subscription?</CardTitle>
               </CardHeader>

@@ -45,6 +45,18 @@ logging:
   level:
     com.practical.work: DEBUG
     org.springframework.security: DEBUG
+    org.springframework.web: DEBUG
+    org.springframework.web.servlet.DispatcherServlet: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    org.apache.catalina.connector: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%logger{40}] - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%logger{40}] - %msg%n"
+  file:
+    name: logs/application.log
+    max-size: 100MB
+    max-history: 30
 
 app:
   jwt:

@@ -3,9 +3,12 @@ package com.practical.work.service;
 import com.practical.work.dto.FormattingResult;
 import com.practical.work.dto.TextChunk;
 import com.practical.work.dto.IndexedFormattingResult;
+import com.practical.work.model.ProcessedDocument;
+import com.practical.work.repository.ProcessedDocumentRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.poi.xwpf.usermodel.*;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPageSz;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -19,6 +22,9 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.Optional;
 
 @Service
 @Slf4j
@@ -39,29 +45,24 @@ public class DocumentProcessingService {
     @Autowired
     private UkrainianAcademicFormattingService academicFormattingService;
 
+    @Autowired
+    private ProcessedDocumentRepository documentRepository;
+
     public CompletableFuture<String> processDocument(String inputFilePath, String fileId) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                log.info("Начало многопоточной обработки документа: {}", inputFilePath);
+                log.info("Начало обработки документа: {}", inputFilePath);
                 
-                // Создание директории для обработанных файлов если она не существует
-                Path processedDirPath = Paths.get(processedDir);
-                if (!Files.exists(processedDirPath)) {
-                    Files.createDirectories(processedDirPath);
-                }
-
-                // Чтение исходного документа
-                File inputFile = new File(inputFilePath);
-                long fileSizeBytes = inputFile.length();
-                XWPFDocument document = new XWPFDocument(new FileInputStream(inputFile));
-                
-                log.info("Размер обрабатываемого файла: {} байт ({} KB)", 
-                    fileSizeBytes, fileSizeBytes / 1024);
-
-                // Получение всех абзацев документа
+                // Загрузка документа
+                XWPFDocument document = new XWPFDocument(new FileInputStream(inputFilePath));
                 List<XWPFParagraph> paragraphs = document.getParagraphs();
                 
-                // Создание блоков текста для параллельной обработки
+                log.info("Документ загружен, найдено {} абзацев", paragraphs.size());
+                
+                // Получаем размер файла для оценки сложности обработки
+                long fileSizeBytes = new File(inputFilePath).length();
+                
+                // Создаем текстовые чанки для обработки
                 List<TextChunk> textChunks = createTextChunks(paragraphs);
                 
                 if (textChunks.isEmpty()) {
@@ -69,10 +70,11 @@ public class DocumentProcessingService {
                     return saveDocument(document, fileId);
                 }
                 
-                log.info("Создано {} блоков для обработки", textChunks.size());
-
-                // Начинаем мониторинг обработки
-                metricsService.startProcessing(fileId, textChunks.size());
+                int actualChunksCount = textChunks.size();
+                log.info("Создано {} блоков для обработки", actualChunksCount);
+                
+                // Начинаем мониторинг обработки с точным количеством чанков
+                metricsService.startProcessing(fileId, actualChunksCount);
 
                 // Параллельная обработка всех блоков с ограниченным количеством потоков
                 List<IndexedFormattingResult> formattingResults = 
@@ -378,5 +380,68 @@ public class DocumentProcessingService {
             log.error("Ошибка получения размера файла: {}", filePath, e);
             return 0;
         }
+    }
+
+    /**
+     * Обновляет оценочное количество чанков в документе
+     */
+    private void updateDocumentEstimatedChunks(String fileId, int actualChunks) {
+        try {
+            Optional<ProcessedDocument> docOpt = documentRepository.findByFileId(fileId);
+            if (docOpt.isPresent()) {
+                ProcessedDocument document = docOpt.get();
+                document.setEstimatedChunks(actualChunks);
+                documentRepository.save(document);
+                log.info("Обновлено оценочное количество чанков для документа {}: {}", fileId, actualChunks);
+            }
+        } catch (Exception e) {
+            log.error("Ошибка обновления оценочного количества чанков для документа {}", fileId, e);
+        }
+    }
+
+    /**
+     * Оценивает количество чанков на основе размера файла и количества абзацев
+     */
+    public int estimateChunksCount(String filePath, int paragraphCount) {
+        try {
+            // Получаем размер файла
+            long fileSizeBytes = new File(filePath).length();
+            
+            // Базовая оценка на основе размера файла
+            int estimatedChunks;
+            
+            if (fileSizeBytes < 50 * 1024) { // < 50 KB
+                estimatedChunks = Math.max(5, paragraphCount);
+            } else if (fileSizeBytes < 200 * 1024) { // < 200 KB
+                estimatedChunks = Math.max(10, paragraphCount);
+            } else if (fileSizeBytes < 500 * 1024) { // < 500 KB
+                estimatedChunks = Math.max(15, paragraphCount);
+            } else if (fileSizeBytes < 1024 * 1024) { // < 1 MB
+                estimatedChunks = Math.max(20, paragraphCount);
+            } else if (fileSizeBytes < 3 * 1024 * 1024) { // < 3 MB
+                estimatedChunks = Math.max(30, paragraphCount);
+            } else {
+                // Для больших файлов используем формулу на основе размера
+                estimatedChunks = Math.max(40, (int)(fileSizeBytes / (30 * 1024)));
+            }
+            
+            log.info("Оценка количества чанков для файла {} (размер: {} KB): {}", 
+                filePath, fileSizeBytes/1024, estimatedChunks);
+            
+            return estimatedChunks;
+            
+        } catch (Exception e) {
+            log.error("Ошибка оценки количества чанков для файла {}", filePath, e);
+            return 22; // Возвращаем среднее значение по умолчанию
+        }
+    }
+
+    /**
+     * Метод для предварительного анализа документа и создания чанков
+     * Используется для оценки прогресса до начала обработки
+     */
+    public List<TextChunk> createTextChunksPreview(List<XWPFParagraph> paragraphs) {
+        log.info("Предварительное разделение документа на чанки, найдено {} абзацев", paragraphs.size());
+        return createTextChunks(paragraphs);
     }
 } 

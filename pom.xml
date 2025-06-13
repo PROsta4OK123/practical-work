@@ -202,6 +202,33 @@
 					<table>flyway_schema_history</table>
 				</configuration>
 			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-clean-plugin</artifactId>
+				<version>3.3.2</version>
+				<configuration>
+					<filesets>
+						<fileset>
+							<directory>${basedir}/src/main/resources/static/.next</directory>
+							<includes>
+								<include>**/*</include>
+							</includes>
+							<followSymlinks>false</followSymlinks>
+						</fileset>
+					</filesets>
+				</configuration>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-resources-plugin</artifactId>
+				<version>3.3.1</version>
+				<configuration>
+					<excludes>
+						<exclude>**/node_modules/**</exclude>
+						<exclude>**/node/**</exclude>
+					</excludes>
+				</configuration>
+			</plugin>
 		</plugins>
 	</build>
 

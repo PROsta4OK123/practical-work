@@ -56,4 +56,10 @@ public interface FileProcessingQueueRepository extends JpaRepository<FileProcess
     // Получить статистику очереди
     @Query("SELECT q.status, COUNT(q) FROM FileProcessingQueue q GROUP BY q.status")
     List<Object[]> getQueueStatistics();
+
+    /**
+     * Получает группированную статистику очереди одним запросом
+     */
+    @Query("SELECT fpq.status, COUNT(fpq) FROM FileProcessingQueue fpq GROUP BY fpq.status")
+    List<Object[]> getQueueStatisticsGrouped();
 } 

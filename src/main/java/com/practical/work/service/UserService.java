@@ -68,11 +68,12 @@ public class UserService {
         return false;
     }
 
-    public void addPoints(User user, int points) {
+    public User addPoints(User user, int points) {
         user.setPoints(user.getPoints() + points);
-        userRepository.save(user);
+        User updatedUser = userRepository.save(user);
         log.info("Пользователю {} добавлено {} поинтов. Всего: {}", 
             user.getEmail(), points, user.getPoints());
+        return updatedUser;
     }
 
     public UserResponse convertToResponse(User user) {

@@ -33,7 +33,8 @@ public class SecurityConfig {
     }
 
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthenticationFilter jwtAuthenticationFilter) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthenticationFilter jwtAuthenticationFilter, 
+                                          RequestLoggingFilter requestLoggingFilter) throws Exception {
         http
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
             .csrf(csrf -> csrf.disable())
@@ -41,9 +42,12 @@ public class SecurityConfig {
             .authorizeHttpRequests(auth -> auth
                 // Разрешить доступ к API аутентификации
                 .requestMatchers("/auth/**").permitAll()
+                // Явно указываем, что для путей /subscription/** требуется аутентификация
+                .requestMatchers("/subscription/**").authenticated()
                 // Все остальные запросы требуют аутентификации
                 .anyRequest().authenticated()
             )
+            .addFilterBefore(requestLoggingFilter, UsernamePasswordAuthenticationFilter.class)
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
             .headers(headers -> headers.frameOptions().disable()); // Для H2 консоли
 

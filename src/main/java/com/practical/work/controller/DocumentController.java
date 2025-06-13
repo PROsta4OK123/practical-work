@@ -19,6 +19,9 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -198,24 +201,26 @@ public class DocumentController {
             ProcessedDocument document = documentOpt.get();
 
             // Проверка, что документ принадлежит пользователю
-            if (!document.getUser().getId().equals(user.getId())) {
+            if (document.getUser() == null || !document.getUser().getId().equals(user.getId())) {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN)
                     .body(Map.of("error", "Доступ запрещен"));
             }
 
-            return ResponseEntity.ok(Map.of(
-                "fileId", document.getFileId(),
-                "originalFilename", document.getOriginalFilename(),
-                "status", document.getStatus().name().toLowerCase(),
-                "originalSize", document.getOriginalSize(),
-                "processedSize", document.getProcessedSize(),
-                "processingStartedAt", document.getProcessingStartedAt(),
-                "processingCompletedAt", document.getProcessingCompletedAt(),
-                "errorMessage", document.getErrorMessage()
-            ));
+            // Используем HashMap для безопасной работы с null значениями
+            Map<String, Object> responseBody = new HashMap<>();
+            responseBody.put("fileId", document.getFileId());
+            responseBody.put("originalFilename", document.getOriginalFilename());
+            responseBody.put("status", document.getStatus() != null ? document.getStatus().name().toLowerCase() : "unknown");
+            responseBody.put("originalSize", document.getOriginalSize());
+            responseBody.put("processedSize", document.getProcessedSize());
+            responseBody.put("processingStartedAt", document.getProcessingStartedAt());
+            responseBody.put("processingCompletedAt", document.getProcessingCompletedAt());
+            responseBody.put("errorMessage", document.getErrorMessage());
+
+            return ResponseEntity.ok(responseBody);
 
         } catch (Exception e) {
-            log.error("Ошибка получения статуса документа {}", fileId, e);
+            log.error("Ошибка получения статуса документа {}: {}", fileId, e.getMessage(), e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(Map.of("error", "Внутренняя ошибка сервера: " + e.getMessage()));
         }
@@ -235,20 +240,84 @@ public class DocumentController {
             String token = authHeader.substring(7);
             User user = authService.getUserFromToken(token);
 
-            // Получение прогресса обработки
-            ProcessingMetricsService.ProcessingStatus progress = 
-                metricsService.getProcessingStatus(fileId);
-            
-            if (progress == null) {
-                return ResponseEntity.notFound().build();
+            // Сначала проверяем, существует ли документ
+            Optional<ProcessedDocument> documentOpt = documentService.getDocument(fileId);
+            if (documentOpt.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "Документ не найден"));
             }
 
-            return ResponseEntity.ok(progress);
+            ProcessedDocument document = documentOpt.get();
 
+            // Проверка, что документ принадлежит пользователю
+            if (!document.getUser().getId().equals(user.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(Map.of("error", "У вас нет доступа к этому документу"));
+            }
+
+            // Получаем статус обработки из сервиса метрик
+            ProcessingMetricsService.ProcessingStatus status = 
+                metricsService.getInitialProcessingStatus(fileId);
+            
+            // Проверяем активную обработку для получения актуальных данных
+            ProcessingMetricsService.ProcessingStatus activeStatus = 
+                metricsService.getProcessingStatus(fileId);
+            
+            if (activeStatus != null) {
+                status = activeStatus;
+            }
+
+            // Вычисляем прогресс в процентах (максимум 100%)
+            double progress = 0.0;
+            if (status.getTotalChunks() > 0) {
+                progress = Math.min(100.0, 
+                    (double) status.getProcessedChunks() / status.getTotalChunks() * 100.0);
+            }
+
+            // Если документ уже обработан, возвращаем 100% прогресс
+            if (document.getStatus() == ProcessedDocument.ProcessingStatus.COMPLETED) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("fileId", fileId);
+                response.put("status", document.getStatus().toString());
+                response.put("progress", 100.0);
+                response.put("processedChunks", status.getTotalChunks());
+                response.put("totalChunks", status.getTotalChunks());
+                
+                return ResponseEntity.ok(response);
+            }
+
+            // Для документов в процессе обработки или ожидающих обработки
+            // используем данные из сервиса метрик
+            Map<String, Object> response = new HashMap<>();
+            response.put("fileId", fileId);
+            response.put("status", document.getStatus().toString());
+            response.put("progress", progress);
+            response.put("processedChunks", status.getProcessedChunks());
+            response.put("totalChunks", status.getTotalChunks());
+            
+            // Добавляем информацию о времени обработки, если доступна
+            if (status.getStartTime() != null) {
+                response.put("startTime", status.getStartTime().toString());
+                
+                // Оценка оставшегося времени
+                if (status.getProcessedChunks() > 0 && status.getTotalChunks() > 0) {
+                    long elapsedSeconds = Duration.between(status.getStartTime(), LocalDateTime.now()).getSeconds();
+                    double chunksPerSecond = (double) status.getProcessedChunks() / Math.max(1, elapsedSeconds);
+                    int remainingChunks = status.getTotalChunks() - status.getProcessedChunks();
+                    
+                    if (chunksPerSecond > 0) {
+                        long estimatedRemainingSeconds = (long) (remainingChunks / chunksPerSecond);
+                        response.put("estimatedRemainingSeconds", estimatedRemainingSeconds);
+                    }
+                }
+            }
+
+            return ResponseEntity.ok(response);
+            
         } catch (Exception e) {
-            log.error("Ошибка получения прогресса обработки документа {}", fileId, e);
+            log.error("Ошибка получения статуса обработки документа", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of("error", "Внутренняя ошибка сервера: " + e.getMessage()));
+                .body(Map.of("error", "Ошибка получения статуса обработки документа"));
         }
     }
 
@@ -268,8 +337,8 @@ public class DocumentController {
             // Получение статистики очереди
             FileQueueService.QueueStatistics stats = fileQueueService.getQueueStatistics();
             
-            // Получение файлов пользователя в очереди
-            List<FileProcessingQueue> userFiles = fileQueueService.getUserQueuedFiles(user.getId());
+            // Получение документов пользователя из основной таблицы (ProcessedDocument)
+            List<ProcessedDocument> userDocuments = documentService.getUserDocuments(user);
 
             return ResponseEntity.ok(Map.of(
                 "queueStatistics", Map.of(
@@ -277,16 +346,19 @@ public class DocumentController {
                     "processingCount", stats.getProcessingCount(),
                     "totalInQueue", stats.getTotalInQueue()
                 ),
-                "userFiles", userFiles.stream().map(file -> Map.of(
-                    "fileId", file.getFileId(),
-                    "originalFilename", file.getOriginalFilename(),
-                    "status", file.getStatus().name().toLowerCase(),
-                    "priority", file.getPriority().name().toLowerCase(),
-                    "queuePosition", fileQueueService.getQueuePosition(file.getId()),
-                    "createdAt", file.getCreatedAt(),
-                    "startedAt", file.getStartedAt(),
-                    "estimatedThreads", file.getEstimatedThreads()
-                )).toList()
+                "userFiles", userDocuments.stream().map(doc -> {
+                    Map<String, Object> docMap = new HashMap<>();
+                    docMap.put("fileId", doc.getFileId());
+                    docMap.put("originalFilename", doc.getOriginalFilename());
+                    docMap.put("status", doc.getStatus().name().toLowerCase());
+                    docMap.put("originalSize", doc.getOriginalSize() != null ? doc.getOriginalSize() : 0);
+                    docMap.put("processedSize", doc.getProcessedSize() != null ? doc.getProcessedSize() : 0);
+                    docMap.put("processingStartedAt", doc.getProcessingStartedAt());
+                    docMap.put("processingCompletedAt", doc.getProcessingCompletedAt());
+                    docMap.put("createdAt", doc.getCreatedAt());
+                    docMap.put("errorMessage", doc.getErrorMessage());
+                    return docMap;
+                }).toList()
             ));
 
         } catch (Exception e) {

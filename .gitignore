@@ -41,9 +41,6 @@ build/
 uploads/
 processed/
 
-# AI Model files (too large for git)
-model/
-
 # Frontend build
 src/main/resources/static/.next/
 src/main/resources/static/node_modules/
